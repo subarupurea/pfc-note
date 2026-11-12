@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#1F7A5C">
 <title>PFCノート</title>
 <link rel="manifest" href="manifest.json">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-v2-192.png">
+<link rel="apple-touch-icon" href="icon-v2-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
 <style>
@@ -160,8 +160,22 @@ const DEFAULT_MIXERS=[
   {id:'m3',name:'無調整豆乳',per100:{kcal:44,p:3.6,f:2.8,c:3.1}},
   {id:'m4',name:'水',per100:{kcal:0,p:0,f:0,c:0}}];
 const S={profile:null,settings:{...DEFAULT_SETTINGS},entries:[],foods:[],proteins:[],mixers:DEFAULT_MIXERS.slice(),weights:[],stats:{openai:0,gemini:0}};
-async function load(){await DB.open();for(const k of Object.keys(S)){const v=await DB.get(k);if(v!==undefined)S[k]=v}S.settings={...DEFAULT_SETTINGS,...S.settings}}
-function save(...keys){keys.forEach(k=>DB.set(k,S[k]))}
+// 予備コピー: 写真サムネイルを除いた内容を localStorage にも保存し、どちらかが消えても復元できるようにする
+const LS='pfc-note:';
+function lsGet(k){try{const v=localStorage.getItem(LS+k);return v==null?undefined:JSON.parse(v)}catch(e){return undefined}}
+function lsSet(k,v){try{if(k==='entries'||k==='foods')v=v.map(x=>({...x,thumb:''}));localStorage.setItem(LS+k,JSON.stringify(v))}catch(e){}}
+async function load(){
+  let idbOk=true;try{await DB.open()}catch(e){idbOk=false}
+  for(const k of Object.keys(S)){
+    let v=idbOk?await DB.get(k):undefined;
+    if(v===undefined){v=lsGet(k);if(v!==undefined&&idbOk)DB.set(k,v)}
+    if(v!==undefined)S[k]=v;
+  }
+  S.settings={...DEFAULT_SETTINGS,...S.settings};
+}
+function save(...keys){keys.forEach(k=>{DB.set(k,S[k]);lsSet(k,S[k])})}
+let persisted=null;
+async function askPersist(){try{if(navigator.storage?.persist){persisted=await navigator.storage.persisted()||await navigator.storage.persist()}}catch(e){}}
 
 /* ---------- helpers ---------- */
 const $=s=>document.querySelector(s);
@@ -176,6 +190,22 @@ const today=()=>ymd(new Date());
 const WD='日月火水木金土';
 function dateLabel(s){const d=parseYmd(s);const t=today();const pre=s===t?'今日 ':s===addDays(t,-1)?'昨日 ':'';return `${pre}${d.getMonth()+1}/${d.getDate()}(${WD[d.getDay()]})`}
 const MEALS=[['breakfast','朝食'],['lunch','昼食'],['dinner','夕食'],['snack','間食']];
+// 間食は snack, snack-2, snack-3 … と何回でも増やせる
+const snackNo=k=>k==='snack'?1:+(k.split('-')[1]||1);
+const isSnack=k=>String(k).startsWith('snack');
+const extraSnacks={};// 日付ごとに、まだ記録がない追加分の間食枠
+function snackKeys(date){
+  const set=new Set(['snack']);
+  S.entries.forEach(e=>{if(e.date===date&&isSnack(e.meal))set.add(e.meal)});
+  (extraSnacks[date]||[]).forEach(k=>set.add(k));
+  return [...set].sort((a,b)=>snackNo(a)-snackNo(b));
+}
+function mealKeys(date){return ['breakfast','lunch','dinner',...snackKeys(date)]}
+function mealName(k,date){
+  if(!isSnack(k))return (MEALS.find(m=>m[0]===k)||[,'食事'])[1];
+  return snackKeys(date).length>1||snackNo(k)>1?`間食${snackNo(k)}`:'間食';
+}
+function newSnack(date){const n=Math.max(...snackKeys(date).map(snackNo))+1;const k=`snack-${n}`;(extraSnacks[date]=extraSnacks[date]||[]).push(k);return k}
 function mealByTime(){const h=new Date().getHours();return h<10?'breakfast':h<15?'lunch':h<17?'snack':'dinner'}
 function sum(list){return list.reduce((a,e)=>({kcal:a.kcal+(+e.kcal||0),p:a.p+(+e.p||0),f:a.f+(+e.f||0),c:a.c+(+e.c||0)}),{kcal:0,p:0,f:0,c:0})}
 function toast(msg){const t=$('#toast');t.textContent=msg;t.hidden=false;clearTimeout(toast.t);toast.t=setTimeout(()=>t.hidden=true,2400)}
@@ -280,13 +310,16 @@ function renderHome(){
       <div class="center"><span class="muted small">${remain>=0?'残り':'超過'}</span><span class="big num">${Math.abs(r0(remain))}</span><span class="muted small num">${r0(tot.kcal)} / ${r0(T.kcal)} kcal</span></div></div>
     <div class="bars">${bar('タンパク質 P','dotp',tot.p,T.protein,'var(--p)')}${bar('脂質 F','dotf',tot.f,T.fat,'var(--f)')}${bar('炭水化物 C','dotc',tot.c,T.carb,'var(--c)')}</div>
   </div></div>`;
-  for(const [k,n] of MEALS){
+  for(const k of mealKeys(UI.date)){
+    const n=mealName(k,UI.date);
     const es=list.filter(e=>e.meal===k);const s=sum(es);
-    html+=`<div class="card meal"><h3><span>${n}</span><span class="muted small num">${r0(s.kcal)} kcal</span></h3>`;
+    const tm=isSnack(k)&&es.length?new Date(Math.min(...es.map(e=>e.createdAt||0))):null;
+    html+=`<div class="card meal"><h3><span>${n}${tm&&tm.getTime()?` <span class="muted small num">${tm.getHours()}:${pad(tm.getMinutes())}</span>`:''}</span><span class="muted small num">${r0(s.kcal)} kcal</span></h3>`;
     html+=es.length?es.map(e=>`<button class="entry" data-act="edit" data-id="${e.id}">${e.thumb?`<img class="thumb" src="${e.thumb}" alt="">`:`<span class="thumb">${({protein:'🥤',label:'🏷',manual:'✎',repeat:'↻'})[e.source]||'🍽'}</span>`}
       <span class="body"><span class="name">${esc(e.name)}</span><br>${pfcLine(e)}${e.amount?` <span class="pfc">· ${esc(e.amount)}</span>`:''}</span><span class="k num">${r0(e.kcal)}</span></button>`).join(''):`<div class="empty">まだ記録がありません</div>`;
-    html+=`<div class="row" style="margin-top:6px"><button class="chip" data-act="open-add" data-meal="${k}">＋ 追加</button><button class="chip" data-act="copy-yday" data-meal="${k}">↻ 前日の${n}をコピー</button></div></div>`;
+    html+=`<div class="row" style="margin-top:6px"><button class="chip" data-act="open-add" data-meal="${k}">＋ 追加</button>${isSnack(k)?'':`<button class="chip" data-act="copy-yday" data-meal="${k}">↻ 前日の${n}をコピー</button>`}</div></div>`;
   }
+  html+=`<button class="btn ghost" data-act="new-snack">＋ 間食を追加</button>`;
   v.innerHTML=html;
 }
 
@@ -326,6 +359,7 @@ function weightChart(ws,p){
 }
 
 /* ---------- settings ---------- */
+function keyStatus(k){return k?`<span style="color:var(--accent)">✓ 保存済み（末尾 …${esc(k.slice(-4))}）</span>`:'<span class="muted">未設定</span>'}
 function renderSettings(){
   const p=S.profile||{sex:'male',age:'',height:'',startWeight:'',targetWeight:'',months:3,activity:1.375,proteinPerKg:2.0,fatPct:25,startDate:today()};
   const st=S.settings;const T=S.profile?computeTargets(S.profile,latestWeight(),today()):null;
@@ -355,13 +389,15 @@ function renderSettings(){
     ${T.warns.map(w=>`<div class="warn" style="margin-top:8px">${esc(w)}</div>`).join('')}
     <p class="small muted" style="margin-bottom:0">体重を記録するたびに、最新の体重と残り日数で計算し直します。体脂肪1kg＝約7,200kcalで計算しています。</p></div>`:''}
   <div class="card"><h2>AI（写真解析）</h2>
-    <label class="f">OpenAI APIキー<input id="s-ok" type="password" autocomplete="off" value="${esc(st.openaiKey)}" placeholder="sk-..."></label>
+    <label class="f">OpenAI APIキー<input id="s-ok" type="password" autocomplete="off" value="${esc(st.openaiKey)}" placeholder="ここに貼り付け"></label>
+    <div class="small" id="ks-ok">${keyStatus(st.openaiKey)}</div>
     <label class="f" style="margin-top:8px">OpenAIのモデル<input id="s-om" value="${esc(st.openaiModel)}"></label>
     <div class="sep" style="margin:12px 0"></div>
-    <label class="f">Gemini APIキー<input id="s-gk" type="password" autocomplete="off" value="${esc(st.geminiKey)}" placeholder="AIza..."></label>
+    <label class="f">Gemini APIキー<input id="s-gk" type="password" autocomplete="off" value="${esc(st.geminiKey)}" placeholder="ここに貼り付け"></label>
+    <div class="small" id="ks-gk">${keyStatus(st.geminiKey)}</div>
     <label class="f" style="margin-top:8px">Geminiのモデル<input id="s-gm" value="${esc(st.geminiModel)}"></label>
     <label class="f" style="margin-top:12px">ふだん使うAI<select id="s-prov"><option value="openai" ${st.provider==='openai'?'selected':''}>OpenAI</option><option value="gemini" ${st.provider==='gemini'?'selected':''}>Gemini</option><option value="both" ${st.provider==='both'?'selected':''}>両方で比較</option></select></label>
-    <p class="small muted">キーはこの端末の中だけに保存され、OpenAI・Googleへの通信にのみ使います。モデル名は各社の新モデルに合わせて書き換えられます。</p>
+    <p class="small muted">貼り付けると自動で保存されます。キーはこの端末の中だけに保存され、OpenAI・Googleへの通信にのみ使います。モデル名は各社の新モデルに合わせて書き換えられます。</p>
     ${(S.stats.openai+S.stats.gemini)?`<p class="small">比較で採用した回数： OpenAI <b class="num">${S.stats.openai}</b> 回 ／ Gemini <b class="num">${S.stats.gemini}</b> 回</p>`:''}
     <button class="btn" data-act="save-ai">保存</button>
   </div>
@@ -374,6 +410,9 @@ function renderSettings(){
     <div class="row" style="margin-top:8px"><button class="btn ghost" data-act="add-dish">器を追加</button><button class="btn" data-act="save-hand">保存</button></div>
   </div>
   <div class="card"><h2>データ</h2>
+    <p class="small" style="margin-top:0">${persisted?'<span style="color:var(--accent)">✓ データ保護が有効です。</span>ブラウザが容量整理をしても記録は消されません。':'<span class="muted">データ保護は未確定です。ホーム画面に追加したアプリから開くと有効になりやすくなります。</span>'}</p>
+    <p class="small muted">記録 <b class="num">${S.entries.length}</b> 件 ／ マイ食品 <b class="num">${S.foods.length}</b> 件 ／ 体重 <b class="num">${S.weights.length}</b> 件</p>
+    <label class="row small" style="margin-bottom:8px"><input type="checkbox" id="exp-keys" style="width:auto"> バックアップにAPIキーも含める（ファイルの扱いに注意）</label>
     <div class="row"><button class="btn line" data-act="export">バックアップを書き出す</button><label class="btn line" for="imp">バックアップを読み込む</label><input id="imp" type="file" accept="application/json" hidden></div>
     <div class="row" style="margin-top:10px"><label class="f grow">表示テーマ<select id="s-theme"><option value="">端末に合わせる</option><option value="light" ${st.theme==='light'?'selected':''}>ライト</option><option value="dark" ${st.theme==='dark'?'selected':''}>ダーク</option></select></label></div>
   </div>`;
@@ -423,7 +462,7 @@ function renderAdd(){
   if(a.mode==='repeat')body+=renderRepeat();
   sh.innerHTML=`<header><div class="wrap"><button class="iconbtn" data-act="close" aria-label="閉じる">×</button><b>食事を記録</b><input type="date" id="a-date" value="${a.date}" style="width:auto"></div></header>
   <div class="wrap content">
-    <div class="seg">${MEALS.map(([k,n])=>`<button data-act="meal" data-v="${k}" aria-pressed="${a.meal===k}">${n}</button>`).join('')}</div>
+    <div class="chips">${mealKeys(a.date).map(k=>`<button class="chip" data-act="meal" data-v="${k}" aria-pressed="${a.meal===k}">${mealName(k,a.date)}</button>`).join('')}<button class="chip" data-act="sheet-new-snack">＋ 間食</button></div>
     <div class="modes">${MODES.map(([k,i,n])=>`<button data-act="mode" data-v="${k}" aria-pressed="${a.mode===k}"><span class="ic">${i}</span>${n}</button>`).join('')}</div>
     ${body}
   </div>`;
@@ -488,7 +527,7 @@ function renderRepeat(){
   const a=UI.add;
   return `<input id="r-q" placeholder="過去の記録から探す" value="${esc(a.q)}">
     <div class="row"><span class="small muted">数量</span>${[0.5,1,1.5,2].map(x=>`<button class="chip" data-act="rmult" data-v="${x}" aria-pressed="${UI.repeatMult===x}">×${x}</button>`).join('')}</div>
-    <div class="row"><button class="btn ghost grow" data-act="copy-yday" data-meal="${a.meal}">↻ 前日の${MEALS.find(m=>m[0]===a.meal)[1]}をまるごとコピー</button></div>
+    <div class="row"><button class="btn ghost grow" data-act="copy-yday" data-meal="${a.meal}">↻ 前日の${mealName(a.meal,addDays(a.date,-1))}をまるごとコピー</button></div>
     <div id="r-lists" style="display:flex;flex-direction:column;gap:14px">${repeatLists()}</div>`;
 }
 function repeatLists(){
@@ -517,7 +556,7 @@ function addEntries(items,source,extra={}){
 }
 function copyYesterday(meal,date){
   const y=addDays(date,-1);const src=S.entries.filter(e=>e.date===y&&e.meal===meal);
-  const name=MEALS.find(m=>m[0]===meal)[1];
+  const name=mealName(meal,y);
   if(!src.length){toast(`前日の${name}の記録がありません`);return false}
   for(const e of src)S.entries.push({...e,id:uid(),date,createdAt:Date.now(),source:'repeat'});
   save('entries');toast(`前日の${name}を${src.length}件コピーしました`);return true;
@@ -534,7 +573,7 @@ function openEdit(id){
     <label class="f">名前<input id="e-name" value="${esc(e.name)}"></label>
     <label class="f">量<input id="e-amount" value="${esc(e.amount)}"></label>
     <div class="grid4">${[['kcal','kcal'],['p','P (g)'],['f','F (g)'],['c','C (g)']].map(([k,n])=>`<label class="f">${n}<input id="e-${k}" type="number" inputmode="decimal" step="0.1" value="${e[k]}"></label>`).join('')}</div>
-    <div class="grid2"><label class="f">食事<select id="e-meal">${MEALS.map(([k,n])=>`<option value="${k}" ${e.meal===k?'selected':''}>${n}</option>`).join('')}</select></label><label class="f">日付<input id="e-date" type="date" value="${e.date}"></label></div>
+    <div class="grid2"><label class="f">食事<select id="e-meal">${mealKeys(e.date).map(k=>`<option value="${k}" ${e.meal===k?'selected':''}>${mealName(k,e.date)}</option>`).join('')}<option value="__new">＋ 新しい間食</option></select></label><label class="f">日付<input id="e-date" type="date" value="${e.date}"></label></div>
     ${e.provider?`<p class="small muted" style="margin:0">解析: ${e.provider==='openai'?'OpenAI':'Gemini'}</p>`:''}
     <div class="row"><button class="btn grow" data-act="save-edit" data-id="${e.id}">保存</button>${f?`<button class="btn ghost" data-act="fav" data-id="${f.id}" data-from="edit" data-eid="${e.id}">${f.fav?'★ お気に入り済み':'☆ お気に入り'}</button>`:''}</div>
     <div class="row" id="del-zone"><button class="btn danger" data-act="ask-del" data-id="${e.id}">この記録を削除</button></div>
@@ -549,6 +588,8 @@ document.addEventListener('click',async ev=>{
   switch(act){
     case 'day':UI.date=addDays(UI.date,+t.dataset.n);if(UI.date>today())UI.date=today();render();break;
     case 'open-add':openAdd(t.dataset.meal);break;
+    case 'new-snack':openAdd(newSnack(UI.date));break;
+    case 'sheet-new-snack':syncAddInputs();a.meal=newSnack(a.date);renderAdd();break;
     case 'close':closeSheet();break;
     case 'meal':a.meal=t.dataset.v;renderAdd();break;
     case 'mode':syncAddInputs();a.mode=t.dataset.v;a.results=null;a.photo=null;a.note='';renderAdd();break;
@@ -594,6 +635,7 @@ document.addEventListener('click',async ev=>{
     case 'edit':openEdit(t.dataset.id);break;
     case 'save-edit':{const e=S.entries.find(x=>x.id===t.dataset.id);
       Object.assign(e,{name:$('#e-name').value,amount:$('#e-amount').value,kcal:r0($('#e-kcal').value),p:r1($('#e-p').value),f:r1($('#e-f').value),c:r1($('#e-c').value),meal:$('#e-meal').value,date:$('#e-date').value||e.date});
+      if(e.meal==='__new'){e.meal='';e.meal=newSnack(e.date)}
       save('entries');toast('保存しました');closeSheet();break}
     case 'ask-del':$('#del-zone').innerHTML=`<span class="small">本当に削除しますか？</span><button class="btn danger" data-act="del-entry" data-id="${t.dataset.id}">削除する</button><button class="btn line" data-act="close">やめる</button>`;break;
     case 'del-entry':S.entries=S.entries.filter(x=>x.id!==t.dataset.id);save('entries');toast('削除しました');closeSheet();break;
@@ -612,12 +654,13 @@ document.addEventListener('click',async ev=>{
     case 'add-dish':{const n=$('#d-name').value.trim(),s=$('#d-size').value.trim();if(!n||!s){toast('名前と寸法を入れてください');break}
       S.settings.dishes.push({id:uid(),name:n,size:s});save('settings');render();break}
     case 'del-dish':S.settings.dishes=S.settings.dishes.filter(d=>d.id!==t.dataset.id);save('settings');render();break;
-    case 'export':{const data=JSON.stringify({...S,settings:{...S.settings,openaiKey:'',geminiKey:''}});
-      const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const l=document.createElement('a');l.href=url;l.download=`pfc-note-${today()}.json`;document.body.appendChild(l);l.click();l.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('書き出しました（APIキーは含みません）');break}
+    case 'export':{const withKeys=$('#exp-keys')?.checked;const data=JSON.stringify(withKeys?S:{...S,settings:{...S.settings,openaiKey:'',geminiKey:''}});
+      const url=URL.createObjectURL(new Blob([data],{type:'application/json'}));const l=document.createElement('a');l.href=url;l.download=`pfc-note-${today()}.json`;document.body.appendChild(l);l.click();l.remove();setTimeout(()=>URL.revokeObjectURL(url),2000);toast(withKeys?'書き出しました（APIキーを含みます）':'書き出しました（APIキーは含みません）');break}
   }
 });
 document.addEventListener('input',ev=>{
   const t=ev.target;
+  if(t.id==='s-ok'||t.id==='s-gk'){const k=t.id==='s-ok'?'openaiKey':'geminiKey';S.settings[k]=t.value.trim();save('settings');const st=$(t.id==='s-ok'?'#ks-ok':'#ks-gk');if(st)st.innerHTML=keyStatus(S.settings[k])}
   if(t.id==='m-name'&&UI.add){UI.add.manual.name=t.value;const h=$('#m-hits');if(h)h.innerHTML=manualHits(t.value)}
   if(t.id==='r-q'&&UI.add){UI.add.q=t.value;const l=$('#r-lists');if(l)l.innerHTML=repeatLists()}
 });
@@ -628,7 +671,7 @@ document.addEventListener('change',async ev=>{
   if(t.id==='a-date'&&a)a.date=t.value||a.date;
   if(a&&['pr-p','pr-m','pr-g','pr-ml'].includes(t.id)){syncAddInputs();if(t.id==='pr-p')a.prot.g='';renderAdd()}
   if(t.id==='s-theme'){S.settings.theme=t.value;save('settings');applyTheme()}
-  if(t.id==='imp'&&t.files[0]){try{const d=JSON.parse(await t.files[0].text());for(const k of Object.keys(S))if(d[k]!==undefined&&k!=='settings')S[k]=d[k];if(d.settings)S.settings={...S.settings,...d.settings,openaiKey:S.settings.openaiKey,geminiKey:S.settings.geminiKey};Object.keys(S).forEach(k=>save(k));toast('読み込みました');render()}catch(e){toast('ファイルを読み込めませんでした')}}
+  if(t.id==='imp'&&t.files[0]){try{const d=JSON.parse(await t.files[0].text());for(const k of Object.keys(S))if(d[k]!==undefined&&k!=='settings')S[k]=d[k];if(d.settings)S.settings={...S.settings,...d.settings,openaiKey:d.settings.openaiKey||S.settings.openaiKey,geminiKey:d.settings.geminiKey||S.settings.geminiKey};Object.keys(S).forEach(k=>save(k));toast('読み込みました');render()}catch(e){toast('ファイルを読み込めませんでした')}}
 });
 function syncAddInputs(){
   const a=UI.add;if(!a)return;
@@ -678,11 +721,18 @@ async function protLabel(file){
 
 /* ---------- boot ---------- */
 function applyTheme(){const t=S.settings.theme;if(t)document.documentElement.setAttribute('data-theme',t);else document.documentElement.removeAttribute('data-theme')}
+// LINEなどのアプリ内ブラウザは保存領域がChromeと別になるため、外部ブラウザで開き直す
+(function(){const ua=navigator.userAgent;
+  if(/ Line\//i.test(ua)&&!/openExternalBrowser=1/.test(location.search)){const u=new URL(location.href);u.searchParams.set('openExternalBrowser','1');location.replace(u.toString())}
+})();
+const IN_APP=/ Line\/|FBAN|FBAV|Instagram|; wv\)/i.test(navigator.userAgent);
 (async()=>{
   try{await load()}catch(e){toast('保存領域を開けませんでした。データは保存されません')}
+  await askPersist();
   applyTheme();
   if(!S.profile)UI.tab='settings';
   render();
+  if(IN_APP){const b=document.createElement('div');b.className='warn';b.style.cssText='position:fixed;left:12px;right:12px;top:calc(8px + env(safe-area-inset-top,0px));z-index:50';b.innerHTML='アプリ内ブラウザで開いています。ここで入力した内容はChromeやホーム画面のアプリとは別に保存されます。右上のメニューから「ブラウザで開く」を選んでください。';document.body.appendChild(b)}
   if('serviceWorker' in navigator&&location.protocol==='https:')navigator.serviceWorker.register('sw.js').catch(()=>{});
 })();
 </script>
